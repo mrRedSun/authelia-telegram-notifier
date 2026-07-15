@@ -2,16 +2,19 @@
 
 A lightweight, dependency-free Go sidecar that tails an Authelia log file and sends a Telegram message for successful and unsuccessful authentication attempts.
 
-## Quick start
+## Install with Docker Compose
 
 1. Create a Telegram bot with [@BotFather](https://t.me/BotFather), then obtain the destination chat ID (for example, by messaging the bot and calling `https://api.telegram.org/bot<TOKEN>/getUpdates`).
-2. Copy the environment file and fill in the values:
+2. Create a directory for the notifier and its environment file:
 
    ```sh
-   cp .env.example .env
+   mkdir authelia-telegram-notifier && cd authelia-telegram-notifier
+   curl -fsSLO https://raw.githubusercontent.com/mrRedSun/authelia-telegram-notifier/master/.env.example
+   mv .env.example .env
    ```
 
-3. Configure Authelia to write JSON logs to a shared file:
+3. Edit `.env` and set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+4. Configure Authelia to write JSON logs to a persistent directory shared with the notifier:
 
    ```yaml
    log:
@@ -20,27 +23,62 @@ A lightweight, dependency-free Go sidecar that tails an Authelia log file and se
      file_path: /config/logs/authelia.log
    ```
 
-4. Start the notifier:
+5. Create `docker-compose.yml`, replacing `/path/to/authelia/config` with the host directory mounted as `/config` in your Authelia container:
 
-   ```sh
-   docker compose up -d --build
+   ```yaml
+   services:
+     authelia-telegram-notifier:
+       image: ghcr.io/mrredsun/authelia-telegram-notifier:latest
+       container_name: authelia-telegram-notifier
+       restart: unless-stopped
+       env_file: .env
+       volumes:
+         - /path/to/authelia/config:/config:ro
    ```
 
-Alternatively, use the published image after replacing `mrredsun` with the GitHub owner if you fork the project:
+6. Start it and follow its logs:
 
-```sh
-docker run -d --restart unless-stopped --env-file .env \
-  -v /path/to/authelia:/config:ro \
-  ghcr.io/mrredsun/authelia-telegram-notifier:latest
-```
+   ```sh
+   docker compose up -d
+   docker compose logs -f
+   ```
 
 The notifier starts at the end of the log by default, so it only reports new authentication attempts. Set `READ_EXISTING_LOGS=true` once if you intentionally want to process historic lines. It supports both Authelia's default logfmt output and JSON logs; JSON is recommended because it preserves fields consistently.
 
-## Docker Compose integration
+### Existing Authelia Compose stack
 
-The included `docker-compose.yml` is a sidecar definition. Add its `authelia-telegram-notifier` service to the same Compose project as Authelia and mount the same configuration directory into both containers. The shared mount must contain `logs/authelia.log`.
+If Authelia is already managed by Docker Compose, add this service to the same `docker-compose.yml`. Reuse the exact config mount used by Authelia; it must be writable by Authelia and mounted read-only by the notifier.
 
-Use the named volume shown in the example only if Authelia also uses it. For a bind mount, replace `authelia-config:/config:ro` with your existing Authelia configuration mount, for example `./authelia:/config:ro`.
+```yaml
+  authelia-telegram-notifier:
+    image: ghcr.io/mrredsun/authelia-telegram-notifier:latest
+    restart: unless-stopped
+    env_file: ./authelia-telegram-notifier.env
+    volumes:
+      - ./authelia:/config:ro
+```
+
+Create `authelia-telegram-notifier.env` beside the Compose file using the variables in [`.env.example`](.env.example), then run `docker compose up -d`.
+
+## Install with an AI agent
+
+Give an AI coding or infrastructure agent this prompt, then provide it access to the host's Compose project:
+
+```text
+Install the Authelia Telegram Login Notifier into my existing Docker Compose deployment.
+
+Repository: https://github.com/mrRedSun/authelia-telegram-notifier
+Image: ghcr.io/mrredsun/authelia-telegram-notifier:latest
+
+Requirements:
+1. Inspect my existing Authelia Compose service and configuration; do not change unrelated services.
+2. Configure Authelia JSON logging to a persistent file under its existing /config mount: /config/logs/authelia.log.
+3. Add an authelia-telegram-notifier sidecar which mounts that exact config directory read-only at /config.
+4. Create a protected environment file for TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID. Do not print either secret.
+5. Start or update only the relevant Compose services.
+6. Verify the notifier can read the log file and is running. Do not send a test message unless I explicitly request it.
+7. Report every file changed and the exact commands used.
+```
 
 ## Environment variables
 
