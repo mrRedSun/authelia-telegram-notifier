@@ -1,0 +1,12 @@
+services:
+  authelia-telegram-notifier:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Replace with the same bind mount or named volume used by Authelia.
+      - authelia-config:/config:ro
+
+volumes:
+  authelia-config:
+    external: true
