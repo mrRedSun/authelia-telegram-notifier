@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -23,6 +24,7 @@ var (
 	firstFactorSuccessRE = regexp.MustCompile(`(?i)^successful 1fa authentication attempt made by user '([^']+)'$`)
 	totpSuccessRE        = regexp.MustCompile(`(?i)^successful totp authentication attempt made by user '([^']+)'$`)
 	failureRE            = regexp.MustCompile(`(?i)\bunsuccessful (?:1fa|2fa|totp|duo|u2f|webauthn)? ?authentication attempt`)
+	authUserRE           = regexp.MustCompile(`(?i)authentication attempt(?: made)? by user '([^']*)'`)
 	userRE               = regexp.MustCompile(`(?i)\buser[= ]+['"]?([^\s'"]+)`)
 	ipRE                 = regexp.MustCompile(`(?i)\bremote(?:_| )ip[= ]+['"]?([^\s'"]+)`)
 	timeRE               = regexp.MustCompile(`\btime=["']([^"']+)["']`)
@@ -39,6 +41,7 @@ type config struct {
 	readyFile                   string
 	readyMaxAge                 time.Duration
 	uid, gid                    *int
+	successCoalesceWindow       time.Duration
 }
 
 type loginEvent struct {
@@ -85,6 +88,9 @@ func loadConfig() (config, error) {
 	}
 	if c.readyMaxAge, err = durationSecondsEnv("HEALTHCHECK_MAX_AGE_SECONDS", 90); err != nil || c.readyMaxAge <= 0 {
 		return c, fmt.Errorf("HEALTHCHECK_MAX_AGE_SECONDS must be a positive number")
+	}
+	if c.successCoalesceWindow, err = durationSecondsEnv("SUCCESS_COALESCE_WINDOW_SECONDS", 5); err != nil || c.successCoalesceWindow < 0 {
+		return c, fmt.Errorf("SUCCESS_COALESCE_WINDOW_SECONDS must be a non-negative number")
 	}
 	if c.uid, err = optionalIntEnv("PUID"); err != nil {
 		return c, err
@@ -190,7 +196,11 @@ func parseEvent(line string) (loginEvent, bool) {
 		e.timestamp = capture(timeRE, line)
 	}
 	if e.user == "" {
-		e.user = capture(userRE, line)
+		if match := authUserRE.FindStringSubmatch(message); len(match) == 2 {
+			e.user = match[1]
+		} else {
+			e.user = capture(userRE, line)
+		}
 	}
 	if e.remoteIP == "" {
 		e.remoteIP = capture(ipRE, line)
@@ -399,17 +409,25 @@ func main() {
 	}
 	log.Printf("successful-login notifications require Authelia log.level=debug; info-level Authelia logs only reliably contain failed attempts")
 	client := &http.Client{Timeout: c.timeout}
+	sendEvent := func(e loginEvent) {
+		if err := notify(client, c, e); err != nil {
+			log.Printf("sending Telegram notification: %v", err)
+			return
+		}
+		log.Printf("sent %s login notification for user=%s ip=%s", map[bool]string{true: "successful", false: "failed"}[e.successful], e.user, e.remoteIP)
+	}
+	coalescer := newSuccessCoalescer(c.successCoalesceWindow, sendEvent)
 	if err := follow(c, func(line string) {
 		e, ok := parseEvent(line)
 		if !ok || (e.successful && !c.notifySuccess) || (!e.successful && !c.notifyFailure) {
 			return
 		}
 		log.Printf("detected %s authentication event%s for user=%s ip=%s", map[bool]string{true: "successful", false: "failed"}[e.successful], eventKindSuffix(e.kind), e.user, e.remoteIP)
-		if err := notify(client, c, e); err != nil {
-			log.Printf("sending Telegram notification: %v", err)
-			return
+		if e.successful {
+			coalescer.submit(e)
+		} else {
+			sendEvent(e)
 		}
-		log.Printf("sent %s login notification for user=%s ip=%s", map[bool]string{true: "successful", false: "failed"}[e.successful], e.user, e.remoteIP)
 	}); err != nil {
 		log.Fatal(err)
 	}
@@ -428,4 +446,50 @@ func eventKindSuffix(kind string) string {
 		return ""
 	}
 	return " (" + kind + ")"
+}
+
+// successCoalescer delays a 1FA success briefly. If its matching TOTP success
+// arrives, it sends only the completed two-factor event instead.
+type successCoalescer struct {
+	window       time.Duration
+	send         func(loginEvent)
+	mu           sync.Mutex
+	pendingFirst map[string]*time.Timer
+}
+
+func newSuccessCoalescer(window time.Duration, send func(loginEvent)) *successCoalescer {
+	return &successCoalescer{window: window, send: send, pendingFirst: make(map[string]*time.Timer)}
+}
+
+func eventKey(event loginEvent) string { return event.user + "\x00" + event.remoteIP }
+
+func (c *successCoalescer) submit(event loginEvent) {
+	if event.kind == "1FA" && c.window > 0 {
+		key := eventKey(event)
+		c.mu.Lock()
+		if previous := c.pendingFirst[key]; previous != nil {
+			previous.Stop()
+		}
+		var timer *time.Timer
+		timer = time.AfterFunc(c.window, func() {
+			c.mu.Lock()
+			if c.pendingFirst[key] == timer {
+				delete(c.pendingFirst, key)
+			}
+			c.mu.Unlock()
+			c.send(event)
+		})
+		c.pendingFirst[key] = timer
+		c.mu.Unlock()
+		return
+	}
+	if event.kind == "TOTP" {
+		c.mu.Lock()
+		if pending := c.pendingFirst[eventKey(event)]; pending != nil {
+			pending.Stop()
+			delete(c.pendingFirst, eventKey(event))
+		}
+		c.mu.Unlock()
+	}
+	c.send(event)
 }

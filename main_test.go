@@ -47,9 +47,37 @@ func TestFollowExitsAfterUnreadableTarget(t *testing.T) {
 	}
 }
 
+func TestSuccessCoalescerPrefersTOTP(t *testing.T) {
+	sent := make(chan loginEvent, 2)
+	coalescer := newSuccessCoalescer(20*time.Millisecond, func(event loginEvent) { sent <- event })
+	coalescer.submit(loginEvent{successful: true, kind: "1FA", user: "alice", remoteIP: "192.0.2.10"})
+	time.Sleep(2 * time.Millisecond)
+	coalescer.submit(loginEvent{successful: true, kind: "TOTP", user: "alice", remoteIP: "192.0.2.10"})
+	select {
+	case event := <-sent:
+		if event.kind != "TOTP" {
+			t.Fatalf("sent %s instead of TOTP", event.kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not send TOTP event")
+	}
+	select {
+	case event := <-sent:
+		t.Fatalf("unexpected duplicate event: %s", event.kind)
+	case <-time.After(40 * time.Millisecond):
+	}
+}
+
 func TestParseLogfmtFailure(t *testing.T) {
 	e, ok := parseEvent(`level=error msg="Unsuccessful TOTP authentication attempt" user=bob remote_ip=198.51.100.5`)
 	if !ok || e.successful || e.user != "bob" || e.remoteIP != "198.51.100.5" {
+		t.Fatalf("unexpected event: %#v, ok=%t", e, ok)
+	}
+}
+
+func TestUnknownUserIsNotExtractedFromError(t *testing.T) {
+	e, ok := parseEvent(`{"level":"error","msg":"Unsuccessful 1FA authentication attempt by user ''","error":"user not found","path":"/api/firstfactor","remote_ip":"194.44.117.6","time":"2026-07-15T18:04:43+03:00"}`)
+	if !ok || e.successful || e.user != "" {
 		t.Fatalf("unexpected event: %#v, ok=%t", e, ok)
 	}
 }

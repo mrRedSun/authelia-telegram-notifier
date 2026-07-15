@@ -54,7 +54,7 @@ The parser recognizes these structured success signals:
 - 1FA: `level=debug`, `path=/api/firstfactor`, and `Successful 1FA authentication attempt made by user '...'`.
 - TOTP: `level=debug`, `path=/api/secondfactor/totp`, and `Successful TOTP authentication attempt made by user '...'`.
 
-The TOTP event is the strongest indication that a two-factor login completed. The notifier logs `detected successful authentication event (TOTP)` before sending its Telegram request, making it easy to distinguish parsing issues from Telegram delivery failures.
+The TOTP event is the strongest indication that a two-factor login completed. A two-factor login emits both 1FA and TOTP success lines; the notifier holds the 1FA notification for five seconds and, if the matching TOTP event arrives, sends only the TOTP notification. One-factor logins still send their 1FA notification after that short window. Set `SUCCESS_COALESCE_WINDOW_SECONDS=0` to disable this behavior. The notifier logs `detected successful authentication event (TOTP)` before sending its Telegram request, making it easy to distinguish parsing issues from Telegram delivery failures.
 
 ### Log-file permissions and health
 
@@ -114,6 +114,7 @@ Requirements:
 | `READ_EXISTING_LOGS` | No | Set to `true` to process existing log lines on startup. |
 | `NOTIFY_SUCCESS` | No | Set to `false` to suppress success messages. |
 | `NOTIFY_FAILURE` | No | Set to `false` to suppress failure messages. |
+| `SUCCESS_COALESCE_WINDOW_SECONDS` | No | Delay 1FA successes while waiting for a matching TOTP success; default `5`, or `0` to disable. |
 | `TELEGRAM_API_TIMEOUT_SECONDS` | No | HTTP timeout; default `10`. |
 | `LOG_RETRY_MAX_ATTEMPTS` | No | Consecutive stat/open/read failures before exit; default `10`. |
 | `LOG_RETRY_INITIAL_SECONDS` | No | First retry delay; default `1`. |
