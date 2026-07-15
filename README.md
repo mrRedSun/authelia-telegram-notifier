@@ -18,7 +18,7 @@ A lightweight, dependency-free Go sidecar that tails an Authelia log file and se
 
    ```yaml
    log:
-     level: info
+     level: debug
      format: json
      file_path: /config/logs/authelia.log
    ```
@@ -44,6 +44,29 @@ A lightweight, dependency-free Go sidecar that tails an Authelia log file and se
    ```
 
 The notifier starts at the end of the log by default, so it only reports new authentication attempts. Set `READ_EXISTING_LOGS=true` once if you intentionally want to process historic lines. It supports both Authelia's default logfmt output and JSON logs; JSON is recommended because it preserves fields consistently.
+
+### Required Authelia log level
+
+Successful 1FA and TOTP events are emitted by Authelia at `debug` severity. Failures are emitted at `error`, which is why an `info` configuration shows failed attempts but not successful ones. To receive both notification types, use `level: debug` as shown above. At `info`, this notifier can reliably notify only failed attempts; inferring success from authorization or session events would be unreliable.
+
+The parser recognizes these structured success signals:
+
+- 1FA: `level=debug`, `path=/api/firstfactor`, and `Successful 1FA authentication attempt made by user '...'`.
+- TOTP: `level=debug`, `path=/api/secondfactor/totp`, and `Successful TOTP authentication attempt made by user '...'`.
+
+The TOTP event is the strongest indication that a two-factor login completed. The notifier logs `detected successful authentication event (TOTP)` before sending its Telegram request, making it easy to distinguish parsing issues from Telegram delivery failures.
+
+### Log-file permissions and health
+
+Authelia commonly creates its file log as `root:root` with mode `0600`. The published image runs as root by default specifically so it can read that file through its read-only mount. It never writes to the Authelia configuration directory.
+
+If your security policy requires a non-root notifier, use one of these options:
+
+- Change the host log file ownership or group and mode to grant the notifier read access.
+- Start the container with `user: "<uid>:<gid>"`, provided that identity can read the log file.
+- Keep the container initially root and set `PUID` and `PGID` to drop privileges after startup. Those IDs must have read access to the mounted log.
+
+The watcher logs every failed `stat`, open, or read operation with the file path, retries with bounded exponential backoff, and exits non-zero after ten consecutive failures by default. Docker then restarts it. Its Docker health check is healthy only after the log has been opened and read successfully; it becomes unhealthy if that watcher state is lost.
 
 ### Existing Authelia Compose stack
 
@@ -72,7 +95,7 @@ Image: ghcr.io/mrredsun/authelia-telegram-notifier:latest
 
 Requirements:
 1. Inspect my existing Authelia Compose service and configuration; do not change unrelated services.
-2. Configure Authelia JSON logging to a persistent file under its existing /config mount: /config/logs/authelia.log.
+2. Configure Authelia JSON debug logging to a persistent file under its existing /config mount: /config/logs/authelia.log.
 3. Add an authelia-telegram-notifier sidecar which mounts that exact config directory read-only at /config.
 4. Create a protected environment file for TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID. Do not print either secret.
 5. Start or update only the relevant Compose services.
@@ -86,11 +109,16 @@ Requirements:
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Yes | Telegram bot token. |
 | `TELEGRAM_CHAT_ID` | Yes | Target user, group, or channel chat ID. |
-| `AUTHELIA_LOG_PATH` | No | Log path inside the notifier container; default `/config/logs/authelia.log`. |
+| `LOG_PATH` | No | Preferred log path inside the notifier container; default `/config/logs/authelia.log`. |
+| `AUTHELIA_LOG_PATH` | No | Legacy alias for `LOG_PATH`; used only when `LOG_PATH` is unset. |
 | `READ_EXISTING_LOGS` | No | Set to `true` to process existing log lines on startup. |
 | `NOTIFY_SUCCESS` | No | Set to `false` to suppress success messages. |
 | `NOTIFY_FAILURE` | No | Set to `false` to suppress failure messages. |
 | `TELEGRAM_API_TIMEOUT_SECONDS` | No | HTTP timeout; default `10`. |
+| `LOG_RETRY_MAX_ATTEMPTS` | No | Consecutive stat/open/read failures before exit; default `10`. |
+| `LOG_RETRY_INITIAL_SECONDS` | No | First retry delay; default `1`. |
+| `LOG_RETRY_MAX_SECONDS` | No | Maximum retry delay; default `30`. |
+| `PUID` / `PGID` | No | Optional UID/GID to use after startup; requires an initially-root container. |
 
 Messages intentionally contain no passwords, tokens, or requested URLs. They include the event outcome, username when logged by Authelia, source IP when available, and timestamp.
 
